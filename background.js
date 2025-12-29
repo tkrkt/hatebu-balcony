@@ -40,52 +40,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // 非同期レスポンスを示す
   }
 
-  if (message.type === "CLEAR_CACHE_AND_RELOAD" && message.url) {
-    console.log("[Background] Processing CLEAR_CACHE_AND_RELOAD for:", message.url);
-    // キャッシュをクリア
-    bookmarkCache.delete(message.url);
-    console.log("[Background] Cache cleared for:", message.url);
-    // 再読込
-    const requestId = ++currentRequestId;
-    fetchAndSendBookmarks(message.url, requestId)
-      .then(() => sendResponse({ status: "ok" }))
-      .catch((error) => {
-        console.error("[Background] Error in CLEAR_CACHE_AND_RELOAD:", error);
-        sendResponse({ status: "error", error: error.message });
-      });
-    return true; // 非同期レスポンスを示す
-  }
-
   sendResponse({ status: "ok" });
   return true;
-});
-
-// アクティブなタブが変わったときの処理
-chrome.tabs.onActivated.addListener(async (activeInfo) => {
-  console.log("[Background] Tab activated:", activeInfo);
-  try {
-    const tab = await chrome.tabs.get(activeInfo.tabId);
-    console.log("[Background] Active tab:", tab);
-    if (tab.url) {
-      const requestId = ++currentRequestId;
-      await fetchAndSendBookmarks(tab.url, requestId);
-    }
-  } catch (error) {
-    console.error("[Background] Error in onActivated:", error);
-  }
-});
-
-// タブの更新を監視
-chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-  if (changeInfo.status === "complete" && tab.url && tab.active) {
-    console.log("[Background] Tab updated (complete):", tab.url);
-    try {
-      const requestId = ++currentRequestId;
-      await fetchAndSendBookmarks(tab.url, requestId);
-    } catch (error) {
-      console.error("[Background] Error in onUpdated:", error);
-    }
-  }
 });
 
 // はてなブックマークを取得してサイドパネルに送信

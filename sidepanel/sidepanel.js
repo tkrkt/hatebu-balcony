@@ -122,9 +122,6 @@ function showBookmarks(url, data) {
         }" data-sort="date" title="新着順">
           🕐
         </button>
-        <button class="reload-button" title="再読込">
-          🔄
-        </button>
         ${
           bookmarkCountText
             ? entryUrl
@@ -206,19 +203,6 @@ function showBookmarks(url, data) {
       showBookmarks(currentUrl, currentBookmarks);
     });
   });
-
-  // リロードボタンのクリックイベントを設定
-  const reloadButton = container.querySelector(".reload-button");
-  if (reloadButton) {
-    reloadButton.addEventListener("click", () => {
-      console.log("[SidePanel] Reload button clicked for:", currentUrl);
-      showLoading(currentUrl);
-      chrome.runtime.sendMessage({
-        type: "CLEAR_CACHE_AND_RELOAD",
-        url: currentUrl,
-      });
-    });
-  }
 }
 
 // タイムスタンプをパースしてDate型に変換（"2021/07/19 23:36" 形式）
