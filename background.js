@@ -3,7 +3,7 @@ console.log("[Background] Background service worker loaded");
 
 // キャッシュ（URLごとのブックマークデータ）
 const bookmarkCache = new Map();
-const CACHE_EXPIRY_MS = 5 * 60 * 1000; // 5分間キャッシュ
+const CACHE_EXPIRY_MS = 10 * 60 * 1000; // 10分間キャッシュ
 
 // リクエストIDトラッキング（最新のリクエストのみを処理）
 let currentRequestId = 0;
