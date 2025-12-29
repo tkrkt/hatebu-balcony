@@ -85,7 +85,7 @@ function showBookmarks(url, data) {
     container.innerHTML = `
       <div class="no-bookmarks">
         <div class="spinner"></div>
-        <p>このページにはブックマークがありません</p>
+        <p>このページにはブックマークコメントがありません</p>
         <p class="url">${escapeHtml(url)}</p>
       </div>
     `;
