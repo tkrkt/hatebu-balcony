@@ -229,6 +229,10 @@ a.bookmark-count:hover {
   font-size: 11px;
 }
 
+.meta a {
+  text-decoration: none;
+}
+
 .stars {
   color: #ff9800;
   font-weight: 500;

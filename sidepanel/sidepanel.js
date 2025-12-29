@@ -128,7 +128,9 @@ function showBookmarks(url, data) {
         ${
           bookmarkCountText
             ? entryUrl
-              ? `<a href="${escapeHtml(entryUrl)}" target="_blank" class="bookmark-count" title="はてなブックマークで見る">${bookmarkCountText}</a>`
+              ? `<a href="${escapeHtml(
+                  entryUrl
+                )}" target="_blank" class="bookmark-count" title="はてなブックマークで見る">${bookmarkCountText}</a>`
               : `<div class="bookmark-count">${bookmarkCountText}</div>`
             : ""
         }
@@ -139,6 +141,9 @@ function showBookmarks(url, data) {
 
   for (const comment of sortedComments) {
     const starText = comment.stars > 0 ? `★ ${comment.stars}` : "";
+    const starLink = `https://b.hatena.ne.jp/entry/${
+      data.eid
+    }/comment/${escapeHtml(comment.user)}`;
     const tagsHtml =
       comment.tags && comment.tags.length > 0
         ? comment.tags
@@ -146,9 +151,7 @@ function showBookmarks(url, data) {
               (tag) =>
                 `<a class="tag" target="_blank" href="https://b.hatena.ne.jp/${escapeHtml(
                   comment.user
-                )}/${escapeHtml(tag)}" >${escapeHtml(
-                  tag
-                )}</a>`
+                )}/${escapeHtml(tag)}" >${escapeHtml(tag)}</a>`
             )
             .join("")
         : "";
@@ -177,7 +180,7 @@ function showBookmarks(url, data) {
                   )}">${escapeHtml(formatDateOnly(comment.timestamp))}</span>`
                 : ""
             }
-            ${starText ? `<span class="stars">${starText}</span>` : ""}
+            ${starText ? `<a href="${starLink}" target="_blank"><span class="stars">${starText}</span></a>` : ""}
           </div>
         </div>
         ${
