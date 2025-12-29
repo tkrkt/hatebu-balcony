@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Hatebu Balcony",
+  "version": "1.0.1",
+  "description": "サイドパネルにはてなブックマークのコメントを表示する非公式拡張機能",
+  "permissions": ["sidePanel", "activeTab", "tabs"],
+  "host_permissions": [
+    "https://b.hatena.ne.jp/*",
+    "http://b.hatena.ne.jp/*",
+    "https://s.hatena.com/*",
+    "https://cdn1.www.st-hatena.com/*",
+    "http://cdn1.www.st-hatena.com/*",
+    "https://cdn.profile-image.st-hatena.com/*",
+    "http://cdn.profile-image.st-hatena.com/*"
+  ],
+  "side_panel": {
+    "default_path": "sidepanel/sidepanel.html"
+  },
+  "icons": {
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}
