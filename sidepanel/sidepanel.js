@@ -6,6 +6,7 @@ let currentUrl = "";
 let currentBookmarks = null;
 let currentSortOrder = "stars"; // 'stars' or 'date'
 let expectedUrl = ""; // 現在ロード中または表示中のURL
+let tabListenersRegistered = false;
 
 // 初期化処理
 async function init() {
@@ -22,6 +23,8 @@ async function init() {
       showLoading(tab.url);
       // バックグラウンドスクリプトに明示的にリクエスト
       chrome.runtime.sendMessage({ type: "REQUEST_BOOKMARKS", url: tab.url });
+
+      registerTabListeners();
     } else {
       console.log("[SidePanel] No tab URL found");
       showError("", "タブのURLを取得できませんでした");
@@ -30,6 +33,32 @@ async function init() {
     console.error("[SidePanel] Init error:", error);
     showError("", error.message);
   }
+}
+
+function registerTabListeners() {
+  if (tabListenersRegistered) return;
+  tabListenersRegistered = true;
+
+  chrome.tabs.onActivated.addListener(async (activeInfo) => {
+    try {
+      const tab = await chrome.tabs.get(activeInfo.tabId);
+      if (!tab?.url) return;
+      showLoading(tab.url);
+      chrome.runtime.sendMessage({ type: "REQUEST_BOOKMARKS", url: tab.url });
+    } catch (error) {
+      console.error("[SidePanel] Error in tabs.onActivated:", error);
+    }
+  });
+
+  chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+    if (changeInfo.status !== "complete" || !tab?.active || !tab?.url) return;
+    try {
+      showLoading(tab.url);
+      chrome.runtime.sendMessage({ type: "REQUEST_BOOKMARKS", url: tab.url });
+    } catch (error) {
+      console.error("[SidePanel] Error in tabs.onUpdated:", error);
+    }
+  });
 }
 
 // ローディング表示
