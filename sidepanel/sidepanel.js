@@ -271,16 +271,119 @@ function showBookmarks(url, data) {
   html += "</div>";
   container.innerHTML = html;
 
-  // タブのクリックイベントを設定
-  const sortTabs = container.querySelectorAll(".sort-tab");
-  sortTabs.forEach((tab) => {
-    tab.addEventListener("click", (e) => {
-      const sortOrder = e.currentTarget.dataset.sort;
-      console.log("[SidePanel] Sort order changed to:", sortOrder);
-      currentSortOrder = sortOrder;
-      showBookmarks(currentUrl, currentBookmarks);
-    });
+  // コメント内のURLらしき文字列をリンクに変換
+  linkifyComments(container);
+
+  attachTabHandlers(container);
+
+  // 進捗表示の反映
+  if (currentSortOrder !== "popular") {
+    updateStarProgressUI();
+  }
+}
+
+function linkifyComments(rootEl) {
+  const commentEls = rootEl.querySelectorAll(".comment");
+  commentEls.forEach((el) => {
+    // 既存のHTMLはescape済みなので、DOM上のtextContentを元に安全に組み立て直す
+    const text = el.textContent || "";
+    el.replaceChildren(linkifyTextToFragment(text));
   });
+}
+
+function linkifyTextToFragment(text) {
+  const fragment = document.createDocumentFragment();
+  if (!text) return fragment;
+
+  // http(s)://... または www.... をざっくり検出
+  const urlRegex = /(https?:\/\/[^\s<>"']+|www\.[^\s<>"']+)/gi;
+
+  let lastIndex = 0;
+  for (const match of text.matchAll(urlRegex)) {
+    const matchedText = match[0];
+    const matchIndex = match.index ?? 0;
+
+    if (matchIndex > lastIndex) {
+      fragment.appendChild(
+        document.createTextNode(text.slice(lastIndex, matchIndex))
+      );
+    }
+
+    // URL末尾に付きがちな句読点などを外す
+    const { urlText, trailing } = splitTrailingPunctuation(matchedText);
+
+    const href = urlText.toLowerCase().startsWith("www.")
+      ? `https://${urlText}`
+      : urlText;
+
+    const safeHref = toSafeHttpUrlOrNull(href);
+    if (safeHref) {
+      const a = document.createElement("a");
+      a.href = safeHref;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.textContent = urlText;
+      fragment.appendChild(a);
+    } else {
+      fragment.appendChild(document.createTextNode(matchedText));
+    }
+
+    if (trailing) {
+      fragment.appendChild(document.createTextNode(trailing));
+    }
+
+    lastIndex = matchIndex + matchedText.length;
+  }
+
+  if (lastIndex < text.length) {
+    fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
+  }
+
+  return fragment;
+}
+
+function splitTrailingPunctuation(urlCandidate) {
+  // 末尾の記号はリンクに含めない（日本語の句読点も含める）
+  const trailingChars = new Set([
+    ".",
+    ",",
+    "!",
+    "?",
+    ";",
+    ":",
+    ")",
+    "]",
+    "}",
+    "、",
+    "。",
+    "！",
+    "？",
+    "」",
+    "』",
+    "）",
+    "］",
+    "｝",
+  ]);
+
+  let end = urlCandidate.length;
+  while (end > 0 && trailingChars.has(urlCandidate[end - 1])) {
+    end -= 1;
+  }
+
+  return {
+    urlText: urlCandidate.slice(0, end),
+    trailing: urlCandidate.slice(end),
+  };
+}
+
+function toSafeHttpUrlOrNull(href) {
+  try {
+    const url = new URL(href);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
 
 // タイムスタンプをパースしてDate型に変換（"2021/07/19 23:36" 形式）
