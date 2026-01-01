@@ -5,6 +5,10 @@ console.log("[Background] Background service worker loaded");
 const bookmarkCache = new Map();
 const CACHE_EXPIRY_MS = 10 * 60 * 1000; // 10分間キャッシュ
 
+// キャッシュ（hostごとの人気ページデータ）
+const originPopularCache = new Map();
+const ORIGIN_POPULAR_CACHE_EXPIRY_MS = 60 * 60 * 1000; // 60分間キャッシュ
+
 // スター数キャッシュ（URIごと）
 const starCountCache = new Map();
 const STAR_COUNT_CACHE_EXPIRY_MS = 60 * 60 * 1000; // 60分
@@ -12,12 +16,19 @@ const STAR_COUNT_CACHE_EXPIRY_MS = 60 * 60 * 1000; // 60分
 // リクエストIDトラッキング（最新のリクエストのみを処理）
 let currentRequestId = 0;
 
+// オリジン人気ページ用のリクエストID（最新のリクエストのみを処理）
+let currentOriginPopularRequestId = 0;
+
 const STAR_BATCH_SIZE = 30;
 const STAR_DELAY_MS = 250;
 const INCLUDE_EMPTY_COMMENTS = false;
 
 function isOutdatedRequest(requestId) {
   return requestId > 0 && requestId < currentRequestId;
+}
+
+function isOutdatedOriginPopularRequest(requestId) {
+  return requestId > 0 && requestId < currentOriginPopularRequestId;
 }
 
 function getCachedStarCount(uri) {
@@ -62,9 +73,160 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // 非同期レスポンスを示す
   }
 
+  if (message.type === "REQUEST_ORIGIN_POPULAR" && (message.url || message.origin)) {
+    const requestId = ++currentOriginPopularRequestId;
+    const urlOrOrigin = message.origin || message.url;
+    console.log(
+      "[Background] Processing REQUEST_ORIGIN_POPULAR for:",
+      urlOrOrigin,
+      "requestId:",
+      requestId
+    );
+
+    fetchAndSendOriginPopular(urlOrOrigin, requestId)
+      .then(() => sendResponse({ status: "ok" }))
+      .catch((error) => {
+        console.error("[Background] Error in REQUEST_ORIGIN_POPULAR:", error);
+        sendResponse({ status: "error", error: error.message });
+      });
+    return true;
+  }
+
   sendResponse({ status: "ok" });
   return true;
 });
+
+function safeGetHost(urlOrHost) {
+  if (!urlOrHost) return null;
+  const s = String(urlOrHost).trim();
+  if (!s) return null;
+  try {
+    // host文字列だけの場合もあるので、スキームが無ければ https を仮付けして解釈
+    const u = s.includes("://") ? new URL(s) : new URL(`https://${s}`);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    return u.hostname || null;
+  } catch {
+    return null;
+  }
+}
+
+function getCachedOriginPopular(host) {
+  const v = originPopularCache.get(host);
+  if (!v) return null;
+  if (Date.now() - v.timestamp > ORIGIN_POPULAR_CACHE_EXPIRY_MS) {
+    originPopularCache.delete(host);
+    return null;
+  }
+  return v.data;
+}
+
+function setCachedOriginPopular(host, data) {
+  originPopularCache.set(host, { data, timestamp: Date.now() });
+}
+
+async function fetchAndSendOriginPopular(urlOrOrigin, requestId = 0) {
+  const host = safeGetHost(urlOrOrigin);
+  if (!host) {
+    // 古いリクエストの場合はスキップ
+    if (isOutdatedOriginPopularRequest(requestId)) return;
+    sendToSidePanel({
+      type: "ORIGIN_POPULAR_UPDATE",
+      origin: "",
+      items: [],
+      requestId,
+    });
+    return;
+  }
+
+  const cached = getCachedOriginPopular(host);
+  if (cached) {
+    if (isOutdatedOriginPopularRequest(requestId)) return;
+    sendToSidePanel({
+      type: "ORIGIN_POPULAR_UPDATE",
+      origin: host,
+      items: cached,
+      requestId,
+    });
+    return;
+  }
+
+  if (isOutdatedOriginPopularRequest(requestId)) return;
+  sendToSidePanel({
+    type: "ORIGIN_POPULAR_LOADING",
+    origin: host,
+    requestId,
+  });
+
+  try {
+    const items = await fetchHatenaOriginPopular(host);
+    setCachedOriginPopular(host, items);
+
+    if (isOutdatedOriginPopularRequest(requestId)) return;
+    sendToSidePanel({
+      type: "ORIGIN_POPULAR_UPDATE",
+      origin: host,
+      items,
+      requestId,
+    });
+  } catch (error) {
+    if (isOutdatedOriginPopularRequest(requestId)) return;
+    sendToSidePanel({
+      type: "ORIGIN_POPULAR_ERROR",
+      origin: host,
+      error: error?.message || String(error),
+      requestId,
+    });
+  }
+}
+
+function parseHatenaWrappedJsonArray(text) {
+  const trimmed = String(text ?? "").trim();
+  if (!trimmed) return [];
+
+  // 例: ([{...}, {...}]);
+  let s = trimmed;
+  if (s.startsWith("(") && s.endsWith(");")) {
+    s = s.slice(1, -2).trim();
+  } else if (s.startsWith("(") && s.endsWith(")")) {
+    s = s.slice(1, -1).trim();
+  }
+
+  if (s.endsWith(";")) s = s.slice(0, -1).trim();
+
+  const parsed = JSON.parse(s);
+  if (!Array.isArray(parsed)) return [];
+  return parsed;
+}
+
+async function fetchHatenaOriginPopular(host) {
+  const apiUrl =
+    "https://b.hatena.ne.jp/entrylist/json?sort=count&url=" +
+    encodeURIComponent(host);
+  console.log("[Background] Fetching Hatena host popular:", apiUrl);
+
+  const res = await fetch(apiUrl, {
+    headers: { "User-Agent": "hatena-sidepanel-extension/1.0" },
+  });
+
+  if (!res.ok) {
+    throw new Error(
+      `Hatena entrylist API error: ${res.status} ${res.statusText}`
+    );
+  }
+
+  const text = await res.text();
+  const arr = parseHatenaWrappedJsonArray(text);
+
+  return arr
+    .map((x) => {
+      const link = typeof x?.link === "string" ? x.link : "";
+      const title = typeof x?.title === "string" ? x.title : "";
+      const countRaw = x?.count;
+      const count = Number.isFinite(Number(countRaw)) ? Number(countRaw) : 0;
+      return { link, title, count };
+    })
+    .filter((x) => x.link);
+}
 
 // はてなブックマークを取得してサイドパネルに送信
 async function fetchAndSendBookmarks(url, requestId = 0) {

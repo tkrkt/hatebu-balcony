@@ -8,6 +8,11 @@ let currentSortOrder = "stars"; // 'stars' or 'date'
 let expectedUrl = ""; // 現在ロード中または表示中のURL
 let tabListenersRegistered = false;
 
+// オリジン人気ページ
+let currentOrigin = "";
+let expectedOrigin = "";
+let currentOriginPopularItems = null;
+
 // スター取得の進捗表示（background から通知される）
 let starFetchProgress = {
   url: "",
@@ -51,6 +56,31 @@ function updateStarProgressUI() {
     el.textContent = "";
     el.classList.add("hidden");
   }
+}
+
+function safeGetOriginFromUrl(url) {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return "";
+    return u.hostname;
+  } catch {
+    return "";
+  }
+}
+
+function requestOriginPopularForUrl(url) {
+  const origin = safeGetOriginFromUrl(url);
+  currentOrigin = origin;
+  expectedOrigin = origin;
+  currentOriginPopularItems = null;
+
+  if (!origin) {
+    showPopularError(url, "このURLでは人気ページを取得できません");
+    return;
+  }
+
+  showPopularLoading(origin);
+  chrome.runtime.sendMessage({ type: "REQUEST_ORIGIN_POPULAR", url });
 }
 
 // 初期化処理
@@ -111,6 +141,9 @@ function showLoading(url) {
   console.log("[SidePanel] Showing loading for:", url);
   currentUrl = url;
   expectedUrl = url;
+  currentOrigin = safeGetOriginFromUrl(url);
+  expectedOrigin = currentOrigin;
+  currentOriginPopularItems = null;
   // 次の表示に向けて進捗をリセット
   starFetchProgress = { url, active: false, text: "" };
   const container = document.getElementById("bookmarks-container");
@@ -125,6 +158,144 @@ function showLoading(url) {
       <p class="url">${escapeHtml(url)}</p>
     </div>
   `;
+}
+
+function buildTabsHtml({
+  active,
+  bookmarkCountText = "",
+  entryUrl = null,
+  showBookmarkCount = true,
+  showStarProgress = true,
+} = {}) {
+  const bookmarkCountHtml =
+    showBookmarkCount && bookmarkCountText
+      ? entryUrl
+        ? `<a href="${escapeHtml(
+          entryUrl
+        )}" target="_blank" class="bookmark-count" title="はてなブックマークで見る">${bookmarkCountText}</a>`
+        : `<div class="bookmark-count">${bookmarkCountText}</div>`
+      : "";
+
+  const starProgressHtml = showStarProgress
+    ? `<div id="star-progress" class="star-progress hidden"></div>`
+    : "";
+
+  return `
+    <div class="header-info">
+      <div class="sort-tabs">
+        <button class="sort-tab ${active === "stars" ? "active" : ""}" data-sort="stars" title="スター数順">⭐</button>
+        <button class="sort-tab ${active === "date" ? "active" : ""}" data-sort="date" title="新着順">🕐</button>
+        <button class="sort-tab ${active === "popular" ? "active" : ""}" data-sort="popular" title="サイト人気">🔥</button>
+        ${bookmarkCountHtml}
+      </div>
+      ${starProgressHtml}
+    </div>
+  `;
+}
+
+function attachTabHandlers(container) {
+  const sortTabs = container.querySelectorAll(".sort-tab");
+  sortTabs.forEach((tab) => {
+    tab.addEventListener("click", (e) => {
+      const sortOrder = e.currentTarget.dataset.sort;
+      console.log("[SidePanel] Sort order changed to:", sortOrder);
+      currentSortOrder = sortOrder;
+
+      if (currentSortOrder === "popular") {
+        requestOriginPopularForUrl(currentUrl);
+        return;
+      }
+
+      if (currentBookmarks) {
+        showBookmarks(currentUrl, currentBookmarks);
+      } else {
+        showLoading(currentUrl);
+        chrome.runtime.sendMessage({ type: "REQUEST_BOOKMARKS", url: currentUrl });
+      }
+    });
+  });
+}
+
+function showPopularLoading(origin) {
+  const container = document.getElementById("bookmarks-container");
+  if (!container) return;
+
+  container.innerHTML = `
+    ${buildTabsHtml({ active: "popular", showBookmarkCount: false, showStarProgress: false })}
+    <div class="loading">
+      <div class="spinner"></div>
+      <p>サイトの人気ページを読み込み中...</p>
+      <p class="url">${escapeHtml(origin)}</p>
+    </div>
+  `;
+
+  attachTabHandlers(container);
+}
+
+function showPopularError(url, error) {
+  const container = document.getElementById("bookmarks-container");
+  if (!container) return;
+
+  const origin = safeGetOriginFromUrl(url);
+  container.innerHTML = `
+    ${buildTabsHtml({ active: "popular", showBookmarkCount: false, showStarProgress: false })}
+    <div class="error">
+      <p>エラーが発生しました</p>
+      <p class="error-message">${escapeHtml(error)}</p>
+      ${origin ? `<p class="url">${escapeHtml(origin)}</p>` : ""}
+    </div>
+  `;
+
+  attachTabHandlers(container);
+}
+
+function showPopular(origin, items) {
+  const container = document.getElementById("bookmarks-container");
+  if (!container) return;
+
+  if (!Array.isArray(items) || items.length === 0) {
+    container.innerHTML = `
+      ${buildTabsHtml({ active: "popular", showBookmarkCount: false, showStarProgress: false })}
+      <div class="no-bookmarks">
+        <div class="spinner"></div>
+        <p>人気ページが見つかりませんでした</p>
+        <p class="url">${escapeHtml(origin)}</p>
+      </div>
+    `;
+    attachTabHandlers(container);
+    return;
+  }
+
+  const siteUrl = `https://b.hatena.ne.jp/site/${encodeURIComponent(origin)}/`;
+  let html = `
+    ${buildTabsHtml({ active: "popular", showBookmarkCount: false, showStarProgress: false })}
+    <div class="url-display"><a href="${escapeHtml(
+    siteUrl
+  )}" target="_blank" rel="noopener noreferrer">${escapeHtml(
+    origin
+  )}</a> の人気</div>
+    <div class="bookmarks-list">
+  `;
+
+  for (const item of items) {
+    const title = item?.title ? String(item.title) : item?.link ? String(item.link) : "";
+    const link = item?.link ? String(item.link) : "";
+    const count = Number(item?.count ?? 0);
+
+    html += `
+      <div class="bookmark-item">
+        <div class="bookmark-header">
+          <a href="${escapeHtml(link)}" target="_blank" class="user-link">${escapeHtml(title)}</a>
+          <div class="meta"><span class="stars">${Number.isFinite(count) && count > 0 ? `★ ${count}` : ""}</span></div>
+        </div>
+        <div class="url">${escapeHtml(link)}</div>
+      </div>
+    `;
+  }
+
+  html += "</div>";
+  container.innerHTML = html;
+  attachTabHandlers(container);
 }
 
 // エラー表示
@@ -150,6 +321,8 @@ function showBookmarks(url, data) {
   console.log("[SidePanel] Showing bookmarks for:", url, "Data:", data);
   currentUrl = url;
   currentBookmarks = data;
+  currentOrigin = safeGetOriginFromUrl(url);
+  expectedOrigin = currentOrigin;
 
   const container = document.getElementById("bookmarks-container");
   if (!container) {
@@ -163,6 +336,13 @@ function showBookmarks(url, data) {
 
   if (!data.comments || data.comments.length === 0) {
     container.innerHTML = `
+      ${buildTabsHtml({
+      active: currentSortOrder,
+      bookmarkCountText,
+      entryUrl,
+      showBookmarkCount: true,
+      showStarProgress: true,
+    })}
       <div class="no-bookmarks">
         <div class="spinner"></div>
         <p>このページにはブックマークコメントがありません</p>
@@ -188,47 +368,30 @@ function showBookmarks(url, data) {
   }
 
   let html = `
-    <div class="header-info">
-      <div class="sort-tabs">
-        <button class="sort-tab ${
-          currentSortOrder === "stars" ? "active" : ""
-        }" data-sort="stars" title="スター数順">
-          ⭐
-        </button>
-        <button class="sort-tab ${
-          currentSortOrder === "date" ? "active" : ""
-        }" data-sort="date" title="新着順">
-          🕐
-        </button>
-        ${
-          bookmarkCountText
-            ? entryUrl
-              ? `<a href="${escapeHtml(
-                  entryUrl
-                )}" target="_blank" class="bookmark-count" title="はてなブックマークで見る">${bookmarkCountText}</a>`
-              : `<div class="bookmark-count">${bookmarkCountText}</div>`
-            : ""
-        }
-      </div>
-    </div>
+    ${buildTabsHtml({
+    active: currentSortOrder,
+    bookmarkCountText,
+    entryUrl,
+    showBookmarkCount: true,
+    showStarProgress: true,
+  })}
     <div class="bookmarks-list">
   `;
 
   for (const comment of sortedComments) {
     const starText = comment.stars > 0 ? `★ ${comment.stars}` : "";
-    const starLink = `https://b.hatena.ne.jp/entry/${
-      data.eid
-    }/comment/${escapeHtml(comment.user)}`;
+    const starLink = `https://b.hatena.ne.jp/entry/${data.eid
+      }/comment/${escapeHtml(comment.user)}`;
     const tagsHtml =
       comment.tags && comment.tags.length > 0
         ? comment.tags
-            .map(
-              (tag) =>
-                `<a class="tag" target="_blank" href="https://b.hatena.ne.jp/${escapeHtml(
-                  comment.user
-                )}/${escapeHtml(tag)}" >${escapeHtml(tag)}</a>`
-            )
-            .join("")
+          .map(
+            (tag) =>
+              `<a class="tag" target="_blank" href="https://b.hatena.ne.jp/${escapeHtml(
+                comment.user
+              )}/${escapeHtml(tag)}" >${escapeHtml(tag)}</a>`
+          )
+          .join("")
         : "";
 
     html += `
@@ -238,31 +401,29 @@ function showBookmarks(url, data) {
              target="_blank"
              class="user-link">
             <img src="https://cdn.profile-image.st-hatena.com/users/${escapeHtml(
-              comment.user
-            )}/profile.png"
+      comment.user
+    )}/profile.png"
                  class="user-icon"
                  alt="${escapeHtml(comment.user)}"
                  onerror="this.onerror=null; this.src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2224%22 height=%2224%22 viewBox=%220 0 24 24%22%3E%3Ccircle cx=%2212%22 cy=%2212%22 r=%2212%22 fill=%22%23ccc%22/%3E%3Ctext x=%2212%22 y=%2217%22 text-anchor=%22middle%22 fill=%22white%22 font-size=%2214%22%3E${escapeHtml(
-                   comment.user.substring(0, 1).toUpperCase()
-                 )}%3C/text%3E%3C/svg%3E';">
+      comment.user.substring(0, 1).toUpperCase()
+    )}%3C/text%3E%3C/svg%3E';">
             ${escapeHtml(comment.user)}
           </a>
           <div class="meta">
-            ${
-              comment.timestamp
-                ? `<span class="timestamp" title="${escapeHtml(
-                    comment.timestamp
-                  )}">${escapeHtml(formatDateOnly(comment.timestamp))}</span>`
-                : ""
-            }
+            ${comment.timestamp
+        ? `<span class="timestamp" title="${escapeHtml(
+          comment.timestamp
+        )}">${escapeHtml(formatDateOnly(comment.timestamp))}</span>`
+        : ""
+      }
             ${starText ? `<a href="${starLink}" target="_blank"><span class="stars">${starText}</span></a>` : ""}
           </div>
         </div>
-        ${
-          comment.comment
-            ? `<div class="comment">${escapeHtml(comment.comment)}</div>`
-            : ""
-        }
+        ${comment.comment
+        ? `<div class="comment">${escapeHtml(comment.comment)}</div>`
+        : ""
+      }
         ${tagsHtml ? `<div class="tags">${tagsHtml}</div>` : ""}
       </div>
     `;
@@ -423,7 +584,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   try {
     if (message.type === "BOOKMARKS_LOADING") {
       console.log("[SidePanel] Processing BOOKMARKS_LOADING");
-      showLoading(message.url);
+      if (currentSortOrder === "popular") {
+        currentUrl = message.url;
+        expectedUrl = message.url;
+        requestOriginPopularForUrl(message.url);
+      } else {
+        showLoading(message.url);
+        // ローディング表示には進捗UIがないため、ここでは何もしない
+      }
     } else if (message.type === "BOOKMARKS_UPDATE") {
       console.log("[SidePanel] Processing BOOKMARKS_UPDATE");
       // URLが変わった場合は、expectedUrlを更新
@@ -437,7 +605,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         );
         expectedUrl = message.url;
       }
-      showBookmarks(message.url, message.data);
+      currentUrl = message.url;
+      currentBookmarks = message.data;
+      if (currentSortOrder === "popular") {
+        requestOriginPopularForUrl(message.url);
+      } else {
+        showBookmarks(message.url, message.data);
+      }
     } else if (message.type === "BOOKMARKS_ERROR") {
       console.log("[SidePanel] Processing BOOKMARKS_ERROR");
       // URLが変わった場合は、expectedUrlを更新
@@ -450,7 +624,67 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         );
         expectedUrl = message.url;
       }
-      showError(message.url, message.error);
+      if (currentSortOrder === "popular") {
+        showPopularError(message.url, message.error);
+      } else {
+        showError(message.url, message.error);
+      }
+    } else if (message.type === "BOOKMARKS_STAR_PROGRESS") {
+      // 表示中/ロード中URLと異なるものは無視（タブ切替の取りこぼし対策）
+      if (message.url !== expectedUrl) {
+        console.log(
+          "[SidePanel] Ignoring STAR_PROGRESS for non-current URL:",
+          message.url,
+          "expected:",
+          expectedUrl
+        );
+      } else {
+        if (currentSortOrder !== "popular") {
+          setStarFetchProgressForUrl(message.url, message.progress);
+          updateStarProgressUI();
+        }
+      }
+    } else if (message.type === "ORIGIN_POPULAR_LOADING") {
+      const origin = message.origin || "";
+      if (!origin || origin !== expectedOrigin) {
+        console.log(
+          "[SidePanel] Ignoring ORIGIN_POPULAR_LOADING for non-current origin:",
+          origin,
+          "expected:",
+          expectedOrigin
+        );
+      } else if (currentSortOrder === "popular") {
+        showPopularLoading(origin);
+      }
+    } else if (message.type === "ORIGIN_POPULAR_UPDATE") {
+      const origin = message.origin || "";
+      if (!origin || origin !== expectedOrigin) {
+        console.log(
+          "[SidePanel] Ignoring ORIGIN_POPULAR_UPDATE for non-current origin:",
+          origin,
+          "expected:",
+          expectedOrigin
+        );
+      } else {
+        currentOriginPopularItems = Array.isArray(message.items)
+          ? message.items
+          : [];
+        if (currentSortOrder === "popular") {
+          showPopular(origin, currentOriginPopularItems);
+        }
+      }
+    } else if (message.type === "ORIGIN_POPULAR_ERROR") {
+      const origin = message.origin || "";
+      if (!origin || origin !== expectedOrigin) {
+        console.log(
+          "[SidePanel] Ignoring ORIGIN_POPULAR_ERROR for non-current origin:",
+          origin,
+          "expected:",
+          expectedOrigin
+        );
+      } else if (currentSortOrder === "popular") {
+        showPopularError(currentUrl, message.error);
+      }
     } else {
       console.log("[SidePanel] Unknown message type:", message.type);
     }
