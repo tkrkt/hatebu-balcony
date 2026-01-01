@@ -1,4 +1,4 @@
-# [Chrome Extension] Hatebu Balcony
+# [Chrome Extension] はてブパネル
 
 ![screenshot](./assets/screenshot.png)
 
