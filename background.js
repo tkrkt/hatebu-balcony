@@ -5,12 +5,34 @@ console.log("[Background] Background service worker loaded");
 const bookmarkCache = new Map();
 const CACHE_EXPIRY_MS = 10 * 60 * 1000; // 10分間キャッシュ
 
+// スター数キャッシュ（URIごと）
+const starCountCache = new Map();
+const STAR_COUNT_CACHE_EXPIRY_MS = 60 * 60 * 1000; // 60分
+
 // リクエストIDトラッキング（最新のリクエストのみを処理）
 let currentRequestId = 0;
 
 const STAR_BATCH_SIZE = 30;
 const STAR_DELAY_MS = 250;
 const INCLUDE_EMPTY_COMMENTS = false;
+
+function isOutdatedRequest(requestId) {
+  return requestId > 0 && requestId < currentRequestId;
+}
+
+function getCachedStarCount(uri) {
+  const v = starCountCache.get(uri);
+  if (!v) return null;
+  if (Date.now() - v.timestamp > STAR_COUNT_CACHE_EXPIRY_MS) {
+    starCountCache.delete(uri);
+    return null;
+  }
+  return v.count;
+}
+
+function setCachedStarCount(uri, count) {
+  starCountCache.set(uri, { count, timestamp: Date.now() });
+}
 
 // 拡張機能のインストール時
 chrome.runtime.onInstalled.addListener(() => {
@@ -71,7 +93,7 @@ async function fetchAndSendBookmarks(url, requestId = 0) {
     if (cached && Date.now() - cached.timestamp < CACHE_EXPIRY_MS) {
       console.log("[Background] Using cached data for:", url);
       // 古いリクエストの場合はスキップ
-      if (requestId > 0 && requestId < currentRequestId) {
+      if (isOutdatedRequest(requestId)) {
         console.log("[Background] Skipping outdated request:", requestId, "current:", currentRequestId);
         return;
       }
@@ -84,27 +106,74 @@ async function fetchAndSendBookmarks(url, requestId = 0) {
     // ローディング状態を送信
     sendToSidePanel({ type: "BOOKMARKS_LOADING", url, requestId });
 
-    const bookmarks = await fetchHatenaBookmarks(url);
-    console.log("[Background] Fetched bookmarks:", bookmarks);
+    // まずはコメント一覧（スター0）を即送信して、表示を早める
+    const {
+      baseData,
+      candidatesByIndex,
+      allCandidateUris,
+    } = await fetchHatenaBookmarksBase(url);
 
-    // キャッシュに保存
+    console.log("[Background] Fetched base bookmarks (no stars yet):", baseData);
+
+    // キャッシュに保存（スターは後で上書きする）
     bookmarkCache.set(url, {
-      data: bookmarks,
+      data: baseData,
       timestamp: Date.now(),
     });
 
-    // 古いリクエストの場合はスキップ（fetch完了後に再チェック）
-    if (requestId > 0 && requestId < currentRequestId) {
-      console.log("[Background] Skipping outdated request after fetch:", requestId, "current:", currentRequestId);
+    if (isOutdatedRequest(requestId)) {
+      console.log(
+        "[Background] Skipping outdated request after base fetch:",
+        requestId,
+        "current:",
+        currentRequestId
+      );
       return;
     }
 
-    // サイドパネルに送信
-    sendToSidePanel({ type: "BOOKMARKS_UPDATE", data: bookmarks, url, requestId });
+    sendToSidePanel({ type: "BOOKMARKS_UPDATE", data: baseData, url, requestId });
+
+    // スター数はバックグラウンドで取得し、取れたら差分を送る
+    if (allCandidateUris.length > 0) {
+      const starCountByUri = await fetchStarCountsForUris(
+        allCandidateUris,
+        () => isOutdatedRequest(requestId),
+        (progress) => {
+          if (isOutdatedRequest(requestId)) return;
+          sendToSidePanel({
+            type: "BOOKMARKS_STAR_PROGRESS",
+            url,
+            requestId,
+            progress,
+          });
+        }
+      );
+
+      if (isOutdatedRequest(requestId)) {
+        console.log(
+          "[Background] Skipping outdated request after star fetch:",
+          requestId,
+          "current:",
+          currentRequestId
+        );
+        return;
+      }
+
+      const withStars = applyStarCounts(baseData, candidatesByIndex, starCountByUri);
+      console.log("[Background] Updated bookmarks with stars:", withStars);
+
+      // キャッシュをスター込みで上書き
+      bookmarkCache.set(url, {
+        data: withStars,
+        timestamp: Date.now(),
+      });
+
+      sendToSidePanel({ type: "BOOKMARKS_UPDATE", data: withStars, url, requestId });
+    }
   } catch (error) {
     console.error("[Background] Error fetching bookmarks:", error);
     // 古いリクエストの場合はエラーも送信しない
-    if (requestId > 0 && requestId < currentRequestId) {
+    if (isOutdatedRequest(requestId)) {
       console.log("[Background] Skipping outdated error:", requestId, "current:", currentRequestId);
       return;
     }
@@ -126,20 +195,24 @@ function sendToSidePanel(message) {
   );
 }
 
-// はてなブックマークのコメントとスターを取得
-async function fetchHatenaBookmarks(targetUrl) {
-  console.log("[Background] fetchHatenaBookmarks for:", targetUrl);
+// はてなブックマークのコメント一覧（スター0）を取得し、スター取得に必要な情報も返す
+async function fetchHatenaBookmarksBase(targetUrl) {
+  console.log("[Background] fetchHatenaBookmarksBase for:", targetUrl);
   const entry = await fetchHatenaEntry(targetUrl);
   console.log("[Background] Hatena entry:", entry);
 
   if (!entry || !entry.eid || !Array.isArray(entry.bookmarks)) {
     console.log("[Background] No bookmarks found");
     return {
-      targetUrl,
-      eid: null,
-      bookmarkCount: 0,
-      comments: [],
-      entryUrl: entry?.entry_url || null,
+      baseData: {
+        targetUrl,
+        eid: null,
+        bookmarkCount: 0,
+        comments: [],
+        entryUrl: entry?.entry_url || null,
+      },
+      candidatesByIndex: new Map(),
+      allCandidateUris: [],
     };
   }
 
@@ -147,61 +220,73 @@ async function fetchHatenaBookmarks(targetUrl) {
   const bookmarks = entry.bookmarks;
   console.log("[Background] Found", bookmarks.length, "bookmarks");
 
-  // 各ブックマークに対してスター候補URIを作成
-  const candidatesByKey = new Map();
+  const comments = [];
+  const candidatesByIndex = new Map();
 
   for (const b of bookmarks) {
     if (!b?.user) continue;
     if (!INCLUDE_EMPTY_COMMENTS && (!b.comment || b.comment.trim() === ""))
       continue;
 
-    const key = makeKey(b);
     const candidates = buildStarTargetCandidates(eid, b);
+    const initialUri = candidates[0] ?? null;
 
-    if (candidates.length === 0) continue;
-    candidatesByKey.set(key, { bookmark: b, candidates });
+    const index = comments.length;
+    comments.push({
+      user: b.user,
+      stars: 0,
+      comment: b.comment ?? "",
+      timestamp: b.timestamp ?? "",
+      tags: b.tags ?? [],
+      starTargetUri: initialUri,
+    });
+
+    if (candidates.length > 0) {
+      candidatesByIndex.set(index, candidates);
+    }
   }
 
-  // すべての候補URIをフラットにしてスターAPIへ
   const allCandidateUris = unique(
-    [...candidatesByKey.values()].flatMap((x) => x.candidates)
+    [...candidatesByIndex.values()].flatMap((x) => x)
   );
 
-  const starCountByUri = await fetchStarCountsForUris(allCandidateUris);
+  return {
+    baseData: {
+      targetUrl,
+      eid,
+      bookmarkCount: entry.count ?? 0,
+      comments,
+      entryUrl: entry.entry_url || null,
+    },
+    candidatesByIndex,
+    allCandidateUris,
+  };
+}
 
-  // 各ブックマークごとに最もスターが付いていたURIを採用
-  const out = [];
-  for (const { bookmark, candidates } of candidatesByKey.values()) {
-    let bestUri = null;
-    let bestCount = 0;
+function applyStarCounts(baseData, candidatesByIndex, starCountByUri) {
+  const comments = baseData.comments.map((c) => ({ ...c }));
+
+  for (const [index, candidates] of candidatesByIndex.entries()) {
+    let bestUri = comments[index]?.starTargetUri ?? null;
+    let bestCount = comments[index]?.stars ?? 0;
 
     for (const uri of candidates) {
-      const c = starCountByUri.get(uri) ?? 0;
-      if (c > bestCount) {
+      const c = starCountByUri.get(uri);
+      if (typeof c === "number" && c > bestCount) {
         bestCount = c;
         bestUri = uri;
       }
     }
 
-    out.push({
-      user: bookmark.user,
-      stars: bestCount,
-      comment: bookmark.comment ?? "",
-      timestamp: bookmark.timestamp ?? "",
-      tags: bookmark.tags ?? [],
-      starTargetUri: bestUri,
-    });
+    if (comments[index]) {
+      comments[index].stars = bestCount;
+      comments[index].starTargetUri = bestUri;
+    }
   }
 
-  // スター降順にソート
-  out.sort((a, b) => b.stars - a.stars);
-
   return {
-    targetUrl,
-    eid,
-    bookmarkCount: entry.count ?? 0,
-    comments: out,
-    entryUrl: entry.entry_url || null,
+    ...baseData,
+    comments,
   };
 }
 
@@ -235,17 +320,11 @@ function buildStarTargetCandidates(eid, bookmark) {
 
   const uris = [];
 
+  // リクエスト数抑制のため、候補URIは必要最小限にする
+  // 基本は comment ページ（HTTPS）を使い、日付が取れる場合のみアンカー付きも試す
+  uris.push(`https://b.hatena.ne.jp/entry/${eid}/comment/${user}`);
   if (yyyymmdd) {
     uris.push(`https://b.hatena.ne.jp/${user}/${yyyymmdd}#bookmark-${eid}`);
-    uris.push(`http://b.hatena.ne.jp/${user}/${yyyymmdd}#bookmark-${eid}`);
-  }
-
-  uris.push(`https://b.hatena.ne.jp/entry/${eid}/comment/${user}`);
-  uris.push(`http://b.hatena.ne.jp/entry/${eid}/comment/${user}`);
-
-  if (yyyymmdd) {
-    uris.push(`https://b.hatena.ne.jp/${user}/${yyyymmdd}`);
-    uris.push(`http://b.hatena.ne.jp/${user}/${yyyymmdd}`);
   }
 
   return unique(uris);
@@ -266,20 +345,48 @@ function makeKey(b) {
 }
 
 // Hatena Star API から複数URIのスター数を取得
-async function fetchStarCountsForUris(uris) {
+async function fetchStarCountsForUris(uris, shouldCancel, onProgress) {
   const result = new Map();
-  const cache = new Map();
 
-  for (let i = 0; i < uris.length; i += STAR_BATCH_SIZE) {
-    const batch = uris.slice(i, i + STAR_BATCH_SIZE);
-
-    const toFetch = batch.filter((u) => !cache.has(u));
-    for (const u of batch) {
-      if (cache.has(u)) result.set(u, cache.get(u));
+  // グローバルキャッシュから即復元
+  const pending = [];
+  for (const u of uris) {
+    const cachedCount = getCachedStarCount(u);
+    if (typeof cachedCount === "number") {
+      result.set(u, cachedCount);
+    } else {
+      pending.push(u);
     }
-    if (toFetch.length === 0) continue;
+  }
 
-    const params = toFetch.map((u) => `uri=${encodeURIComponent(u)}`).join("&");
+  const totalUris = uris.length;
+  const cachedUris = totalUris - pending.length;
+  const totalBatches = pending.length > 0 ? Math.ceil(pending.length / STAR_BATCH_SIZE) : 0;
+
+  if (typeof onProgress === "function") {
+    onProgress({
+      phase: pending.length > 0 ? "start" : "done",
+      doneBatches: pending.length > 0 ? 0 : totalBatches,
+      totalBatches,
+      doneUris: cachedUris,
+      totalUris,
+      percent: totalUris > 0 ? Math.floor((cachedUris / totalUris) * 100) : 100,
+    });
+  }
+
+  let doneBatches = 0;
+  let fetchedUris = 0;
+
+  for (let i = 0; i < pending.length; i += STAR_BATCH_SIZE) {
+    if (typeof shouldCancel === "function" && shouldCancel()) {
+      console.log("[Background] Star fetch canceled");
+      return result;
+    }
+
+    const batch = pending.slice(i, i + STAR_BATCH_SIZE);
+    if (batch.length === 0) continue;
+
+    const params = batch.map((u) => `uri=${encodeURIComponent(u)}`).join("&");
     const apiUrl = `https://s.hatena.com/entry.json?${params}`;
 
     const res = await fetch(apiUrl, {
@@ -298,16 +405,31 @@ async function fetchStarCountsForUris(uris) {
     for (const e of entries) {
       if (!e || typeof e.uri !== "string") continue;
       const count = Array.isArray(e.stars) ? e.stars.length : 0;
-      cache.set(e.uri, count);
+      setCachedStarCount(e.uri, count);
       result.set(e.uri, count);
       returned.add(e.uri);
     }
 
-    for (const u of toFetch) {
+    for (const u of batch) {
       if (!returned.has(u)) {
-        cache.set(u, 0);
+        setCachedStarCount(u, 0);
         result.set(u, 0);
       }
+    }
+
+    doneBatches += 1;
+    fetchedUris += batch.length;
+
+    if (typeof onProgress === "function") {
+      const doneUris = Math.min(totalUris, cachedUris + fetchedUris);
+      onProgress({
+        phase: doneBatches >= totalBatches ? "done" : "progress",
+        doneBatches,
+        totalBatches,
+        doneUris,
+        totalUris,
+        percent: totalUris > 0 ? Math.floor((doneUris / totalUris) * 100) : 100,
+      });
     }
 
     await sleep(STAR_DELAY_MS);

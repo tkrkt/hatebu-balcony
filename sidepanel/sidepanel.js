@@ -8,6 +8,51 @@ let currentSortOrder = "stars"; // 'stars' or 'date'
 let expectedUrl = ""; // 現在ロード中または表示中のURL
 let tabListenersRegistered = false;
 
+// スター取得の進捗表示（background から通知される）
+let starFetchProgress = {
+  url: "",
+  active: false,
+  text: "",
+};
+
+function setStarFetchProgressForUrl(url, progress) {
+  if (!url) return;
+
+  const phase = progress?.phase;
+  const doneBatches = Number(progress?.doneBatches ?? 0);
+  const totalBatches = Number(progress?.totalBatches ?? 0);
+  const doneUris = Number(progress?.doneUris ?? 0);
+  const totalUris = Number(progress?.totalUris ?? 0);
+  const percent = Number(progress?.percent ?? 0);
+
+  if (phase === "done") {
+    starFetchProgress = { url, active: false, text: "" };
+    return;
+  }
+
+  starFetchProgress = {
+    url,
+    active: true,
+    text: `スター取得中… ${percent}%`,
+  };
+}
+
+function updateStarProgressUI() {
+  const el = document.getElementById("star-progress");
+  if (!el) return;
+
+  const show =
+    starFetchProgress.active && starFetchProgress.url === currentUrl;
+
+  if (show) {
+    el.textContent = starFetchProgress.text;
+    el.classList.remove("hidden");
+  } else {
+    el.textContent = "";
+    el.classList.add("hidden");
+  }
+}
+
 // 初期化処理
 async function init() {
   console.log("[SidePanel] Initializing...");
@@ -66,6 +111,8 @@ function showLoading(url) {
   console.log("[SidePanel] Showing loading for:", url);
   currentUrl = url;
   expectedUrl = url;
+  // 次の表示に向けて進捗をリセット
+  starFetchProgress = { url, active: false, text: "" };
   const container = document.getElementById("bookmarks-container");
   if (!container) {
     console.error("[SidePanel] Container element not found!");
@@ -110,6 +157,10 @@ function showBookmarks(url, data) {
     return;
   }
 
+  const bookmarkCountText =
+    data.bookmarkCount > 0 ? `${data.bookmarkCount} users` : "";
+  const entryUrl = data.entryUrl || null;
+
   if (!data.comments || data.comments.length === 0) {
     container.innerHTML = `
       <div class="no-bookmarks">
@@ -118,12 +169,10 @@ function showBookmarks(url, data) {
         <p class="url">${escapeHtml(url)}</p>
       </div>
     `;
+    attachTabHandlers(container);
+    updateStarProgressUI();
     return;
   }
-
-  const bookmarkCountText =
-    data.bookmarkCount > 0 ? `${data.bookmarkCount} users` : "";
-  const entryUrl = data.entryUrl || null;
 
   // ソート順に応じてコメントをソート
   const sortedComments = [...data.comments];
