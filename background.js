@@ -62,9 +62,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log("[Background] Message received:", message);
 
   if (message.type === "REQUEST_BOOKMARKS" && message.url) {
-    console.log("[Background] Processing REQUEST_BOOKMARKS for:", message.url);
     const requestId = ++currentRequestId;
-    fetchAndSendBookmarks(message.url, requestId)
+    console.log(
+      "[Background] Processing REQUEST_BOOKMARKS:",
+      "url=",
+      message.url,
+      "tabId=",
+      message.tabId,
+      "requestId=",
+      requestId
+    );
+    fetchAndSendBookmarksWithCanonical(message.url, message.tabId, requestId)
       .then(() => sendResponse({ status: "ok" }))
       .catch((error) => {
         console.error("[Background] Error in REQUEST_BOOKMARKS:", error);
@@ -95,6 +103,128 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   sendResponse({ status: "ok" });
   return true;
 });
+
+function isHttpUrl(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+async function tryGetCanonicalUrlFromTab(tabId) {
+  if (!Number.isInteger(tabId) || tabId <= 0) {
+    return { canonicalUrl: null, status: "invalid-tabId" };
+  }
+
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        try {
+          const link = document.querySelector('link[rel="canonical" i]');
+          const raw = (link && (link.getAttribute("href") || link.href)) || "";
+          const href = String(raw || "").trim();
+          if (!href) return null;
+          return new URL(href, location.href).toString();
+        } catch {
+          return null;
+        }
+      },
+    });
+
+    const candidate = results?.[0]?.result;
+    if (typeof candidate !== "string") {
+      return { canonicalUrl: null, status: "not-found" };
+    }
+    const s = candidate.trim();
+    if (!s) return { canonicalUrl: null, status: "not-found" };
+    if (!isHttpUrl(s)) return { canonicalUrl: null, status: "invalid-canonical" };
+    return { canonicalUrl: s, status: "found" };
+  } catch (error) {
+    return {
+      canonicalUrl: null,
+      status: "error",
+      errorMessage: error?.message || String(error),
+    };
+  }
+}
+
+async function fetchAndSendBookmarksWithCanonical(url, tabId, requestId = 0) {
+  // http/httpsでないURLは従来通りそのまま処理（executeScriptも不可）
+  if (!isHttpUrl(url)) {
+    console.log(
+      "[Background] REQUEST_BOOKMARKS canonical skipped (non-http(s)):",
+      "url=",
+      url,
+      "requestId=",
+      requestId
+    );
+    return fetchAndSendBookmarks(url, requestId);
+  }
+
+  const canonicalResult = await tryGetCanonicalUrlFromTab(tabId);
+  const canonical = canonicalResult?.canonicalUrl || null;
+  const status = canonicalResult?.status || "unknown";
+
+  if (status === "invalid-tabId") {
+    console.log(
+      "[Background] REQUEST_BOOKMARKS canonical skipped (missing tabId):",
+      "url=",
+      url,
+      "tabId=",
+      tabId,
+      "requestId=",
+      requestId
+    );
+    return fetchAndSendBookmarks(url, requestId);
+  }
+
+  if (status === "error") {
+    console.log(
+      "[Background] REQUEST_BOOKMARKS canonical read failed; fallback to original:",
+      "url=",
+      url,
+      "tabId=",
+      tabId,
+      "requestId=",
+      requestId,
+      "error=",
+      canonicalResult?.errorMessage
+    );
+    return fetchAndSendBookmarks(url, requestId);
+  }
+
+  if (status === "found" && canonical && canonical !== url) {
+    console.log(
+      "[Background] REQUEST_BOOKMARKS using canonical:",
+      "original=",
+      url,
+      "canonical=",
+      canonical,
+      "tabId=",
+      tabId,
+      "requestId=",
+      requestId
+    );
+    return fetchAndSendBookmarks(canonical, requestId);
+  }
+
+  if (status === "invalid-canonical") {
+    console.log(
+      "[Background] REQUEST_BOOKMARKS canonical ignored (non-http(s) canonical):",
+      "url=",
+      url,
+      "tabId=",
+      tabId,
+      "requestId=",
+      requestId
+    );
+  }
+
+  return fetchAndSendBookmarks(url, requestId);
+}
 
 function safeGetHost(urlOrHost) {
   if (!urlOrHost) return null;

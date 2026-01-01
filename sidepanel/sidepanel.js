@@ -20,6 +20,23 @@ let starFetchProgress = {
   text: "",
 };
 
+async function requestBookmarks(url) {
+  try {
+    const [tab] = await chrome.tabs.query({
+      active: true,
+      currentWindow: true,
+    });
+    chrome.runtime.sendMessage({
+      type: "REQUEST_BOOKMARKS",
+      url,
+      tabId: tab?.id,
+    });
+  } catch {
+    // tabId が取れない環境でも最低限動くようにする
+    chrome.runtime.sendMessage({ type: "REQUEST_BOOKMARKS", url });
+  }
+}
+
 function setStarFetchProgressForUrl(url, progress) {
   if (!url) return;
 
@@ -97,7 +114,7 @@ async function init() {
       console.log("[SidePanel] Tab URL:", tab.url);
       showLoading(tab.url);
       // バックグラウンドスクリプトに明示的にリクエスト
-      chrome.runtime.sendMessage({ type: "REQUEST_BOOKMARKS", url: tab.url });
+      requestBookmarks(tab.url);
 
       registerTabListeners();
     } else {
@@ -119,7 +136,7 @@ function registerTabListeners() {
       const tab = await chrome.tabs.get(activeInfo.tabId);
       if (!tab?.url) return;
       showLoading(tab.url);
-      chrome.runtime.sendMessage({ type: "REQUEST_BOOKMARKS", url: tab.url });
+      chrome.runtime.sendMessage({ type: "REQUEST_BOOKMARKS", url: tab.url, tabId: tab.id });
     } catch (error) {
       console.error("[SidePanel] Error in tabs.onActivated:", error);
     }
@@ -129,7 +146,7 @@ function registerTabListeners() {
     if (changeInfo.status !== "complete" || !tab?.active || !tab?.url) return;
     try {
       showLoading(tab.url);
-      chrome.runtime.sendMessage({ type: "REQUEST_BOOKMARKS", url: tab.url });
+      chrome.runtime.sendMessage({ type: "REQUEST_BOOKMARKS", url: tab.url, tabId });
     } catch (error) {
       console.error("[SidePanel] Error in tabs.onUpdated:", error);
     }
@@ -210,7 +227,7 @@ function attachTabHandlers(container) {
         showBookmarks(currentUrl, currentBookmarks);
       } else {
         showLoading(currentUrl);
-        chrome.runtime.sendMessage({ type: "REQUEST_BOOKMARKS", url: currentUrl });
+        requestBookmarks(currentUrl);
       }
     });
   });

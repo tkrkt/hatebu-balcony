@@ -1,0 +1,7 @@
+"https://b.hatena.ne.jp/*",
+"http://b.hatena.ne.jp/*",
+"https://s.hatena.com/*",
+"https://cdn1.www.st-hatena.com/*",
+"http://cdn1.www.st-hatena.com/*",
+"https://cdn.profile-image.st-hatena.com/*",
+"http://cdn.profile-image.st-hatena.com/*"
