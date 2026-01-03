@@ -13,6 +13,11 @@ let currentOrigin = "";
 let expectedOrigin = "";
 let currentOriginPopularItems = null;
 
+// タブのキーボード切り替え
+const SORT_ORDERS = ["stars", "date", "popular"];
+let keyboardHandlersRegistered = false;
+let pendingTabFocusSort = null;
+
 // スター取得の進捗表示（background から通知される）
 let starFetchProgress = {
   url: "",
@@ -103,6 +108,7 @@ function requestOriginPopularForUrl(url) {
 // 初期化処理
 async function init() {
   console.log("[SidePanel] Initializing...");
+  registerKeyboardTabNavigation();
   try {
     // 現在のアクティブタブのブックマークを表示
     const [tab] = await chrome.tabs.query({
@@ -215,21 +221,83 @@ function attachTabHandlers(container) {
   sortTabs.forEach((tab) => {
     tab.addEventListener("click", (e) => {
       const sortOrder = e.currentTarget.dataset.sort;
-      console.log("[SidePanel] Sort order changed to:", sortOrder);
-      currentSortOrder = sortOrder;
-
-      if (currentSortOrder === "popular") {
-        requestOriginPopularForUrl(currentUrl);
-        return;
-      }
-
-      if (currentBookmarks) {
-        showBookmarks(currentUrl, currentBookmarks);
-      } else {
-        showLoading(currentUrl);
-        requestBookmarks(currentUrl);
-      }
+      applySortOrder(sortOrder, { fromKeyboard: false });
     });
+  });
+}
+
+function normalizeSortOrder(sortOrder) {
+  return SORT_ORDERS.includes(sortOrder) ? sortOrder : "stars";
+}
+
+function applyPendingTabFocus(container) {
+  if (!pendingTabFocusSort) return;
+  const sortOrder = pendingTabFocusSort;
+  pendingTabFocusSort = null;
+
+  const btn = container.querySelector(`.sort-tab[data-sort="${sortOrder}"]`);
+  if (btn && typeof btn.focus === "function") {
+    btn.focus({ preventScroll: true });
+  }
+}
+
+function applySortOrder(sortOrder, { fromKeyboard = false } = {}) {
+  const normalized = normalizeSortOrder(sortOrder);
+  if (normalized === currentSortOrder && !fromKeyboard) return;
+
+  console.log("[SidePanel] Sort order changed to:", normalized);
+  currentSortOrder = normalized;
+
+  if (fromKeyboard) {
+    pendingTabFocusSort = normalized;
+  }
+
+  if (currentSortOrder === "popular") {
+    requestOriginPopularForUrl(currentUrl);
+    return;
+  }
+
+  if (currentBookmarks) {
+    showBookmarks(currentUrl, currentBookmarks);
+  } else {
+    showLoading(currentUrl);
+    requestBookmarks(currentUrl);
+  }
+}
+
+function shouldIgnoreArrowKeyForTabSwitch(event) {
+  if (!event) return true;
+
+  if (event.ctrlKey || event.metaKey || event.altKey) return true;
+  // Shift+Arrow は選択操作に使われがちなので避ける
+  if (event.shiftKey) return true;
+
+  const active = document.activeElement;
+  if (!active) return false;
+  const tag = (active.tagName || "").toUpperCase();
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (active.isContentEditable) return true;
+  return false;
+}
+
+function registerKeyboardTabNavigation() {
+  if (keyboardHandlersRegistered) return;
+  keyboardHandlersRegistered = true;
+
+  document.addEventListener("keydown", (e) => {
+    if (e.defaultPrevented) return;
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    if (shouldIgnoreArrowKeyForTabSwitch(e)) return;
+
+    // タブが描画されていない状態では何もしない
+    if (!document.querySelector(".sort-tab")) return;
+
+    const currentIndex = Math.max(0, SORT_ORDERS.indexOf(currentSortOrder));
+    const delta = e.key === "ArrowRight" ? 1 : -1;
+    const nextIndex =
+      (currentIndex + delta + SORT_ORDERS.length) % SORT_ORDERS.length;
+    applySortOrder(SORT_ORDERS[nextIndex], { fromKeyboard: true });
+    e.preventDefault();
   });
 }
 
@@ -247,6 +315,7 @@ function showPopularLoading(origin) {
   `;
 
   attachTabHandlers(container);
+  applyPendingTabFocus(container);
 }
 
 function showPopularError(url, error) {
@@ -264,6 +333,7 @@ function showPopularError(url, error) {
   `;
 
   attachTabHandlers(container);
+  applyPendingTabFocus(container);
 }
 
 function showPopular(origin, items) {
@@ -280,17 +350,18 @@ function showPopular(origin, items) {
       </div>
     `;
     attachTabHandlers(container);
+    applyPendingTabFocus(container);
     return;
   }
 
-  const siteUrl = `https://b.hatena.ne.jp/site/${encodeURIComponent(origin)}/`;
+  const siteUrl = `https://b.hatena.ne.jp/site/${encodeURIComponent(origin)}/?sort=count`;
   let html = `
     ${buildTabsHtml({ active: "popular", showBookmarkCount: false, showStarProgress: false })}
     <div class="url-display"><a href="${escapeHtml(
     siteUrl
   )}" target="_blank" rel="noopener noreferrer">${escapeHtml(
     origin
-  )}</a> の人気</div>
+  )}</a> の人気サイト</div>
     <div class="bookmarks-list">
   `;
 
@@ -313,6 +384,7 @@ function showPopular(origin, items) {
   html += "</div>";
   container.innerHTML = html;
   attachTabHandlers(container);
+  applyPendingTabFocus(container);
 }
 
 // エラー表示
@@ -368,6 +440,7 @@ function showBookmarks(url, data) {
     `;
     attachTabHandlers(container);
     updateStarProgressUI();
+    applyPendingTabFocus(container);
     return;
   }
 
@@ -453,6 +526,8 @@ function showBookmarks(url, data) {
   linkifyComments(container);
 
   attachTabHandlers(container);
+
+  applyPendingTabFocus(container);
 
   // 進捗表示の反映
   if (currentSortOrder !== "popular") {
